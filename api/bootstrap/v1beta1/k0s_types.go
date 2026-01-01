@@ -22,7 +22,7 @@ import (
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"path/filepath"
 
-	clusterv1 "sigs.k8s.io/cluster-api/api/v1beta1"
+	clusterv1 "sigs.k8s.io/cluster-api/api/core/v1beta2"
 )
 
 // EDIT THIS FILE!  THIS IS SCAFFOLDING FOR YOU TO OWN!
@@ -46,11 +46,11 @@ type K0sWorkerConfig struct {
 	Status K0sWorkerConfigStatus `json:"status,omitempty"`
 }
 
-func (k *K0sWorkerConfig) GetConditions() clusterv1.Conditions {
+func (k *K0sWorkerConfig) GetV1Beta1Conditions() clusterv1.Conditions {
 	return k.Status.Conditions
 }
 
-func (k *K0sWorkerConfig) SetConditions(conditions clusterv1.Conditions) {
+func (k *K0sWorkerConfig) SetV1Beta1Conditions(conditions clusterv1.Conditions) {
 	k.Status.Conditions = conditions
 }
 
@@ -183,11 +183,11 @@ type K0sControllerConfigStatus struct {
 	Conditions clusterv1.Conditions `json:"conditions,omitempty"`
 }
 
-func (k *K0sControllerConfig) GetConditions() clusterv1.Conditions {
+func (k *K0sControllerConfig) GetV1Beta1Conditions() clusterv1.Conditions {
 	return k.Status.Conditions
 }
 
-func (k *K0sControllerConfig) SetConditions(conditions clusterv1.Conditions) {
+func (k *K0sControllerConfig) SetV1Beta1Conditions(conditions clusterv1.Conditions) {
 	k.Status.Conditions = conditions
 }
 

@@ -34,7 +34,7 @@ import (
 	"k8s.io/client-go/kubernetes"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	_ "k8s.io/client-go/plugin/pkg/client/auth"
-	clusterv1 "sigs.k8s.io/cluster-api/api/v1beta1"
+	clusterv1 "sigs.k8s.io/cluster-api/api/core/v1beta2"
 	"sigs.k8s.io/cluster-api/util/flags"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/cache"
@@ -54,6 +54,7 @@ import (
 	"github.com/k0sproject/k0smotron/internal/controller/infrastructure"
 	controller "github.com/k0sproject/k0smotron/internal/controller/k0smotron.io"
 	"github.com/k0sproject/k0smotron/internal/featuregate"
+	"github.com/k0sproject/k0smotron/internal/runtimeextension"
 	//+kubebuilder:scaffold:imports
 )
 
@@ -364,6 +365,29 @@ func main() {
 			ClientSet: clientSet,
 		}).SetupWithManager(mgr, ctrlOptions); err != nil {
 			setupLog.Error(err, "unable to create controller", "controller", "ProviderID")
+			os.Exit(1)
+		}
+	}
+
+	// Runtime Extension server for in-place updates (behind feature gate)
+	if runCAPIControllers && featuregate.IsEnabled(featuregate.RuntimeExtension) {
+		setupLog.Info("Setting up Runtime Extension server for in-place updates")
+
+		extensionHandler := &runtimeextension.ExtensionHandler{
+			Client:     mgr.GetClient(),
+			ClientSet:  clientSet,
+			RESTConfig: restConfig,
+		}
+
+		// Use the same cert directory as webhooks (default: /tmp/k8s-webhook-server/serving-certs)
+		extensionServer, err := runtimeextension.NewServer(extensionHandler, runtimeextension.DefaultPort, "")
+		if err != nil {
+			setupLog.Error(err, "unable to create runtime extension server")
+			os.Exit(1)
+		}
+
+		if err := mgr.Add(extensionServer); err != nil {
+			setupLog.Error(err, "unable to add runtime extension server to manager")
 			os.Exit(1)
 		}
 	}

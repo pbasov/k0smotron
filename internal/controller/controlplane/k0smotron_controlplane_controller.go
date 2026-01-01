@@ -39,11 +39,11 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
-	clusterv1 "sigs.k8s.io/cluster-api/api/v1beta1"
-	bootstrapv1 "sigs.k8s.io/cluster-api/bootstrap/kubeadm/api/v1beta1"
+	clusterv1 "sigs.k8s.io/cluster-api/api/core/v1beta2"
+	bootstrapv1 "sigs.k8s.io/cluster-api/api/bootstrap/kubeadm/v1beta2"
 	capiutil "sigs.k8s.io/cluster-api/util"
 	"sigs.k8s.io/cluster-api/util/annotations"
-	"sigs.k8s.io/cluster-api/util/conditions"
+	conditions "sigs.k8s.io/cluster-api/util/conditions/deprecated/v1beta1"
 	"sigs.k8s.io/cluster-api/util/patch"
 	"sigs.k8s.io/cluster-api/util/secret"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -248,11 +248,12 @@ func (c *K0smotronController) waitExternalAddress(ctx context.Context, cluster *
 		host := k0smoCluster.Spec.ExternalAddress
 		port := k0smoCluster.Spec.Service.APIPort
 		// Update the Clusters endpoint if needed
-		if cluster.Spec.InfrastructureRef != nil && (cluster.Spec.ControlPlaneEndpoint.Host != host || cluster.Spec.ControlPlaneEndpoint.Port != int32(port)) {
+		if cluster.Spec.InfrastructureRef.Kind != "" && (cluster.Spec.ControlPlaneEndpoint.Host != host || cluster.Spec.ControlPlaneEndpoint.Port != int32(port)) {
 
 			// Get the infrastructure cluster object
 			infraCluster := &unstructured.Unstructured{}
-			infraCluster.SetGroupVersionKind(cluster.Spec.InfrastructureRef.GroupVersionKind())
+			infraCluster.SetAPIVersion(cluster.Spec.InfrastructureRef.APIGroup + "/v1beta1")
+			infraCluster.SetKind(cluster.Spec.InfrastructureRef.Kind)
 			if err := c.Client.Get(ctx, types.NamespacedName{Namespace: cluster.Namespace, Name: cluster.Spec.InfrastructureRef.Name}, infraCluster); err != nil {
 				log.Error(err, "Failed to get infrastructure cluster")
 				return false, err
@@ -602,15 +603,16 @@ func (c *K0smotronController) patchInfrastructureStatus(ctx context.Context, clu
 	log := log.FromContext(ctx).WithValues("cluster", cluster.Name)
 
 	// Skip if no infrastructure reference exists
-	if cluster.Spec.InfrastructureRef == nil {
+	if cluster.Spec.InfrastructureRef.Kind == "" {
 		return nil
 	}
 
 	// Get the infrastructure object
 	infraObj := &unstructured.Unstructured{}
-	infraObj.SetGroupVersionKind(cluster.Spec.InfrastructureRef.GroupVersionKind())
+	infraObj.SetAPIVersion(cluster.Spec.InfrastructureRef.APIGroup + "/v1beta1")
+	infraObj.SetKind(cluster.Spec.InfrastructureRef.Kind)
 	infraObjKey := types.NamespacedName{
-		Namespace: cluster.Spec.InfrastructureRef.Namespace,
+		Namespace: cluster.Namespace,
 		Name:      cluster.Spec.InfrastructureRef.Name,
 	}
 

@@ -12,8 +12,13 @@ metadata:
   namespace: system
 spec:
   ports:
-    - port: 443
+    - name: webhook
+      port: 443
       protocol: TCP
       targetPort: 9443
+    - name: runtime-extension
+      port: 9444
+      protocol: TCP
+      targetPort: 9444
   selector:
     control-plane: controller-manager

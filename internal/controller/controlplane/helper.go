@@ -35,7 +35,7 @@ import (
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/kubernetes"
-	clusterv1 "sigs.k8s.io/cluster-api/api/v1beta1"
+	clusterv1 "sigs.k8s.io/cluster-api/api/core/v1beta2"
 	"sigs.k8s.io/cluster-api/controllers/external"
 	"sigs.k8s.io/cluster-api/util/collections"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -122,6 +122,12 @@ func (c *K0sController) generateMachine(_ context.Context, name string, cluster 
 	}
 	annotations[cpv1beta1.MachineK0sConfigAnnotation] = k0sConfigAnnotationValue
 
+	// Handle failureDomain - convert from *string to string
+	fd := ""
+	if failureDomain != nil {
+		fd = *failureDomain
+	}
+
 	machine := &clusterv1.Machine{
 		TypeMeta: metav1.TypeMeta{
 			APIVersion: clusterv1.GroupVersion.String(),
@@ -134,20 +140,21 @@ func (c *K0sController) generateMachine(_ context.Context, name string, cluster 
 			Annotations: annotations,
 		},
 		Spec: clusterv1.MachineSpec{
-			Version:       &v,
+			Version:       v,
 			ClusterName:   cluster.Name,
-			FailureDomain: failureDomain,
+			FailureDomain: fd,
 			Bootstrap: clusterv1.Bootstrap{
-				ConfigRef: &corev1.ObjectReference{
-					APIVersion: "bootstrap.cluster.x-k8s.io/v1beta1",
-					Kind:       "K0sControllerConfig",
-					Name:       name,
+				ConfigRef: clusterv1.ContractVersionedObjectReference{
+					APIGroup: "bootstrap.cluster.x-k8s.io",
+					Kind:     "K0sControllerConfig",
+					Name:     name,
 				},
 			},
-			InfrastructureRef:       infraRef,
-			NodeDrainTimeout:        kcp.Spec.MachineTemplate.NodeDrainTimeout,
-			NodeDeletionTimeout:     kcp.Spec.MachineTemplate.NodeDeletionTimeout,
-			NodeVolumeDetachTimeout: kcp.Spec.MachineTemplate.NodeVolumeDetachTimeout,
+			InfrastructureRef: clusterv1.ContractVersionedObjectReference{
+				APIGroup: infraRef.GroupVersionKind().Group,
+				Kind:     infraRef.Kind,
+				Name:     infraRef.Name,
+			},
 		},
 	}
 
@@ -196,7 +203,14 @@ func generateK0sConfigAnnotationValueForMachine(kcp *cpv1beta1.K0sControlPlane, 
 func (c *K0sController) getInfraMachines(ctx context.Context, machines collections.Machines) (map[string]*unstructured.Unstructured, error) {
 	result := map[string]*unstructured.Unstructured{}
 	for _, m := range machines {
-		infraMachine, err := external.Get(ctx, c.Client, &m.Spec.InfrastructureRef)
+		// Convert ContractVersionedObjectReference to corev1.ObjectReference for external.Get
+		infraRef := &corev1.ObjectReference{
+			APIVersion: m.Spec.InfrastructureRef.APIGroup + "/v1beta1",
+			Kind:       m.Spec.InfrastructureRef.Kind,
+			Name:       m.Spec.InfrastructureRef.Name,
+			Namespace:  m.Namespace,
+		}
+		infraMachine, err := external.Get(ctx, c.Client, infraRef)
 		if err != nil {
 			if apierrors.IsNotFound(err) {
 				continue
@@ -682,9 +696,9 @@ func minVersion(machines collections.Machines) (string, error) {
 
 	versions := make([]*version.Version, 0, len(machines))
 	for _, m := range machines {
-		v, err := version.NewVersion(*m.Spec.Version)
+		v, err := version.NewVersion(m.Spec.Version)
 		if err != nil {
-			return "", fmt.Errorf("failed to parse version %s: %w", *m.Spec.Version, err)
+			return "", fmt.Errorf("failed to parse version %s: %w", m.Spec.Version, err)
 		}
 
 		versions = append(versions, v)

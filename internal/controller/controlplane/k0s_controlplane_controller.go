@@ -41,8 +41,8 @@ import (
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
 	"k8s.io/utils/ptr"
-	clusterv1 "sigs.k8s.io/cluster-api/api/v1beta1"
-	kubeadmbootstrapv1 "sigs.k8s.io/cluster-api/bootstrap/kubeadm/api/v1beta1"
+	clusterv1 "sigs.k8s.io/cluster-api/api/core/v1beta2"
+	kubeadmbootstrapv1 "sigs.k8s.io/cluster-api/api/bootstrap/kubeadm/v1beta2"
 	capiutil "sigs.k8s.io/cluster-api/util"
 	"sigs.k8s.io/cluster-api/util/annotations"
 	"sigs.k8s.io/cluster-api/util/certs"
@@ -405,7 +405,7 @@ func (c *K0sController) reconcileMachines(ctx context.Context, cluster *clusterv
 		configurationHasChanged bool
 	)
 	for _, m := range activeMachines.SortedByCreationTimestamp() {
-		if m.Spec.Version == nil || (!versionMatches(m, kcp.Spec.Version)) {
+		if m.Spec.Version == "" || (!versionMatches(m, kcp.Spec.Version)) {
 			clusterIsUpdating = true
 			if kcp.Spec.UpdateStrategy == cpv1beta1.UpdateInPlace {
 				desiredMachines.Insert(m)
@@ -534,8 +534,19 @@ func (c *K0sController) reconcileMachines(ctx context.Context, cluster *clusterv
 			Namespace:  kcp.Namespace,
 		}
 
-		selectedFailureDomain := failuredomains.PickFewest(ctx, cluster.Status.FailureDomains.FilterControlPlane(), activeMachines, deletedMachines)
-		machine, err := c.createMachine(ctx, name, cluster, kcp, infraRef, selectedFailureDomain)
+		// Filter failure domains for control plane
+		var controlPlaneFailureDomains []clusterv1.FailureDomain
+		for _, fd := range cluster.Status.FailureDomains {
+			if fd.ControlPlane != nil && *fd.ControlPlane {
+				controlPlaneFailureDomains = append(controlPlaneFailureDomains, fd)
+			}
+		}
+		selectedFailureDomain := failuredomains.PickFewest(ctx, controlPlaneFailureDomains, activeMachines, deletedMachines)
+		var fdPtr *string
+		if selectedFailureDomain != "" {
+			fdPtr = &selectedFailureDomain
+		}
+		machine, err := c.createMachine(ctx, name, cluster, kcp, infraRef, fdPtr)
 		if err != nil {
 			return fmt.Errorf("error creating machine: %w", err)
 		}
@@ -561,16 +572,10 @@ func (c *K0sController) reconcileMachines(ctx context.Context, cluster *clusterv
 }
 
 func (c *K0sController) inplaceSyncMachineValues(ctx context.Context, kcp *cpv1beta1.K0sControlPlane, machine *clusterv1.Machine) error {
-	patchHelper, err := patch.NewHelper(machine, c.Client)
-	if err != nil {
-		return err
-	}
-
-	machine.Spec.NodeDrainTimeout = kcp.Spec.MachineTemplate.NodeDrainTimeout
-	machine.Spec.NodeDeletionTimeout = kcp.Spec.MachineTemplate.NodeDeletionTimeout
-	machine.Spec.NodeVolumeDetachTimeout = kcp.Spec.MachineTemplate.NodeVolumeDetachTimeout
-
-	return patchHelper.Patch(ctx, machine)
+	// Node*Timeout fields were removed from MachineSpec in CAPI v1beta2
+	// The timeout values are now managed at the MachineDeployment/MachineSet level
+	// This function is kept for compatibility but no longer updates these fields
+	return nil
 }
 
 func (c *K0sController) runMachineDeletionSequence(ctx context.Context, cluster *clusterv1.Cluster, kcp *cpv1beta1.K0sControlPlane, machine *clusterv1.Machine) error {

@@ -26,7 +26,7 @@ import (
 	"k8s.io/client-go/rest"
 	"os/exec"
 	"path/filepath"
-	clusterv1 "sigs.k8s.io/cluster-api/api/v1beta1"
+	clusterv1 "sigs.k8s.io/cluster-api/api/core/v1beta2"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"testing"
 	"time"
@@ -147,7 +147,7 @@ func ingressSupportSpec(t *testing.T) {
 		if err != nil {
 			return false
 		}
-		return md.Status.ReadyReplicas == 2
+		return md.Status.ReadyReplicas != nil && *md.Status.ReadyReplicas == 2
 	}, 5*time.Minute, 10*time.Second, "MachineDeployment failed to become ready")
 
 	fmt.Println("Check kube api connection from the nodes through the proxy")

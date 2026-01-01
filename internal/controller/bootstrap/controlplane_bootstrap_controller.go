@@ -38,14 +38,14 @@ import (
 	"k8s.io/client-go/rest"
 	"k8s.io/kubernetes/cmd/kubeadm/app/constants"
 	"k8s.io/utils/ptr"
-	clusterv1 "sigs.k8s.io/cluster-api/api/v1beta1"
-	kubeadmbootstrapv1 "sigs.k8s.io/cluster-api/bootstrap/kubeadm/api/v1beta1"
+	clusterv1 "sigs.k8s.io/cluster-api/api/core/v1beta2"
+	kubeadmbootstrapv1 "sigs.k8s.io/cluster-api/api/bootstrap/kubeadm/v1beta2"
 	bsutil "sigs.k8s.io/cluster-api/bootstrap/util"
 	"sigs.k8s.io/cluster-api/controllers/remote"
 	capiutil "sigs.k8s.io/cluster-api/util"
 	"sigs.k8s.io/cluster-api/util/annotations"
 	"sigs.k8s.io/cluster-api/util/collections"
-	"sigs.k8s.io/cluster-api/util/conditions"
+	conditions "sigs.k8s.io/cluster-api/util/conditions/deprecated/v1beta1"
 	"sigs.k8s.io/cluster-api/util/patch"
 	"sigs.k8s.io/cluster-api/util/secret"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -131,8 +131,8 @@ func (c *ControlPlaneController) Reconcile(ctx context.Context, req ctrl.Request
 	}
 
 	// If the K0sWorkerConfig does not have a version set, use the machine's version.
-	if config.Spec.Version == "" && machine.Spec.Version != nil {
-		config.Spec.Version = *machine.Spec.Version
+	if config.Spec.Version == "" && machine.Spec.Version != "" {
+		config.Spec.Version = machine.Spec.Version
 	}
 	// If the version does not contain the k0s suffix, append it.
 	if config.Spec.Version != "" && !strings.Contains(config.Spec.Version, "+k0s.") {
@@ -441,7 +441,7 @@ func (c *ControlPlaneController) genTunnelingFiles(ctx context.Context, scope *C
 	frpToken := string(frpSecret.Data["value"])
 
 	localIP := "10.96.0.1"
-	if scope.Cluster.Spec.ClusterNetwork != nil && scope.Cluster.Spec.ClusterNetwork.Services != nil {
+	if len(scope.Cluster.Spec.ClusterNetwork.Services.CIDRBlocks) > 0 {
 		kubeSvcIP, err := constants.GetAPIServerVirtualIP(scope.Cluster.Spec.ClusterNetwork.Services.String())
 		if err != nil {
 			return nil, err
@@ -730,11 +730,11 @@ func (c *ControlPlaneController) getMachineImplementation(ctx context.Context, m
 	infRef := machine.Spec.InfrastructureRef
 
 	machineImpl := new(unstructured.Unstructured)
-	machineImpl.SetAPIVersion(infRef.APIVersion)
+	machineImpl.SetAPIVersion(infRef.APIGroup + "/v1beta1")
 	machineImpl.SetKind(infRef.Kind)
 	machineImpl.SetName(infRef.Name)
 
-	key := client.ObjectKey{Name: infRef.Name, Namespace: infRef.Namespace}
+	key := client.ObjectKey{Name: infRef.Name, Namespace: machine.Namespace}
 
 	err := c.Get(ctx, key, machineImpl)
 	if err != nil {
@@ -941,5 +941,5 @@ func (o machinesByVersionAndCreationTimestamp) Less(i, j int) bool {
 	if o[i].CreationTimestamp.Equal(&o[j].CreationTimestamp) {
 		return o[i].Name < o[j].Name
 	}
-	return *o[i].Spec.Version < *o[j].Spec.Version && o[i].CreationTimestamp.Before(&o[j].CreationTimestamp)
+	return o[i].Spec.Version < o[j].Spec.Version && o[i].CreationTimestamp.Before(&o[j].CreationTimestamp)
 }

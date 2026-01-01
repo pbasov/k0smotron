@@ -22,7 +22,7 @@ import (
 	bootstrapv1 "github.com/k0sproject/k0smotron/api/bootstrap/v1beta1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	clusterv1 "sigs.k8s.io/cluster-api/api/v1beta1"
+	clusterv1 "sigs.k8s.io/cluster-api/api/core/v1beta2"
 )
 
 func init() {
@@ -204,11 +204,11 @@ type K0sControlPlaneStatus struct {
 	Conditions clusterv1.Conditions `json:"conditions,omitempty"`
 }
 
-func (k *K0sControlPlane) GetConditions() clusterv1.Conditions {
+func (k *K0sControlPlane) GetV1Beta1Conditions() clusterv1.Conditions {
 	return k.Status.Conditions
 }
 
-func (k *K0sControlPlane) SetConditions(conditions clusterv1.Conditions) {
+func (k *K0sControlPlane) SetV1Beta1Conditions(conditions clusterv1.Conditions) {
 	k.Status.Conditions = conditions
 }
 

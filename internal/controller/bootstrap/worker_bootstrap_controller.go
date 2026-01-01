@@ -31,13 +31,13 @@ import (
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
 	"k8s.io/utils/ptr"
-	clusterv1 "sigs.k8s.io/cluster-api/api/v1beta1"
+	clusterv1 "sigs.k8s.io/cluster-api/api/core/v1beta2"
 	bsutil "sigs.k8s.io/cluster-api/bootstrap/util"
 	"sigs.k8s.io/cluster-api/controllers/external"
 	"sigs.k8s.io/cluster-api/controllers/remote"
 	capiutil "sigs.k8s.io/cluster-api/util"
 	"sigs.k8s.io/cluster-api/util/annotations"
-	"sigs.k8s.io/cluster-api/util/conditions"
+	conditions "sigs.k8s.io/cluster-api/util/conditions/deprecated/v1beta1"
 	"sigs.k8s.io/cluster-api/util/patch"
 	"sigs.k8s.io/cluster-api/util/secret"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -127,8 +127,8 @@ func (r *Controller) Reconcile(ctx context.Context, req ctrl.Request) (res ctrl.
 	}
 
 	// If the K0sWorkerConfig does not have a version set, use the machine's version.
-	if config.Spec.Version == "" && machine.Spec.Version != nil {
-		config.Spec.Version = *machine.Spec.Version
+	if config.Spec.Version == "" && machine.Spec.Version != "" {
+		config.Spec.Version = machine.Spec.Version
 	}
 
 	// If the version does not contain the k0s suffix, append it.
@@ -200,7 +200,7 @@ func (r *Controller) Reconcile(ctx context.Context, req ctrl.Request) (res ctrl.
 	}
 
 	// Control plane needs to be ready because worker needs to use controlplane API to retrieve a join token.
-	if scope.Cluster.Spec.ControlPlaneEndpoint.IsZero() || !scope.Cluster.Status.ControlPlaneReady {
+	if scope.Cluster.Spec.ControlPlaneEndpoint.IsZero() || !conditions.IsTrue(scope.Cluster, clusterv1.ReadyCondition) {
 		conditions.MarkFalse(config, bootstrapv1.DataSecretAvailableCondition, bootstrapv1.WaitingForControlPlaneInitializationReason, clusterv1.ConditionSeverityInfo, "")
 		return ctrl.Result{Requeue: true, RequeueAfter: time.Second * 5}, nil
 	}
@@ -479,7 +479,14 @@ func (r *Controller) setClientScope(ctx context.Context, cluster *clusterv1.Clus
 	scope.client = r.Client
 	scope.secretCachingClient = r.SecretCachingClient
 
-	uControlPlane, err := external.Get(ctx, r.Client, cluster.Spec.ControlPlaneRef)
+	// Convert ContractVersionedObjectReference to corev1.ObjectReference for external.Get
+	cpRef := &corev1.ObjectReference{
+		APIVersion: cluster.Spec.ControlPlaneRef.APIGroup + "/v1beta1",
+		Kind:       cluster.Spec.ControlPlaneRef.Kind,
+		Name:       cluster.Spec.ControlPlaneRef.Name,
+		Namespace:  cluster.Namespace,
+	}
+	uControlPlane, err := external.Get(ctx, r.Client, cpRef)
 	if err != nil {
 		return err
 	}

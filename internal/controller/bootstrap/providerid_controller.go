@@ -12,7 +12,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/util/retry"
-	clusterv1 "sigs.k8s.io/cluster-api/api/v1beta1"
+	clusterv1 "sigs.k8s.io/cluster-api/api/core/v1beta2"
 	capiutil "sigs.k8s.io/cluster-api/util"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -43,6 +43,9 @@ func (p *ProviderIDController) Reconcile(ctx context.Context, req ctrl.Request) 
 	}
 
 	// Skip non-k0smotron managed machines
+	if machine.Spec.Bootstrap.ConfigRef.Kind == "" {
+		return ctrl.Result{}, nil
+	}
 	if machine.Spec.Bootstrap.ConfigRef.Kind != "K0sControllerConfig" && machine.Spec.Bootstrap.ConfigRef.Kind != "K0sWorkerConfig" &&
 		machine.Spec.InfrastructureRef.Kind != "RemoteMachine" {
 		return ctrl.Result{}, nil
@@ -53,7 +56,7 @@ func (p *ProviderIDController) Reconcile(ctx context.Context, req ctrl.Request) 
 		return ctrl.Result{}, nil
 	}
 
-	if machine.Spec.ProviderID == nil || *machine.Spec.ProviderID == "" {
+	if machine.Spec.ProviderID == "" {
 		log.Info("waiting for providerID for the machine " + machine.Name)
 		return ctrl.Result{RequeueAfter: time.Second * 10}, nil
 	}
@@ -75,7 +78,7 @@ func (p *ProviderIDController) Reconcile(ctx context.Context, req ctrl.Request) 
 
 	var node *corev1.Node
 	for _, n := range nodes.Items {
-		if n.Spec.ProviderID == *machine.Spec.ProviderID {
+		if n.Spec.ProviderID == machine.Spec.ProviderID {
 			// ProviderID is already set on the node
 			return ctrl.Result{}, nil
 		}
@@ -109,7 +112,7 @@ func (p *ProviderIDController) Reconcile(ctx context.Context, req ctrl.Request) 
 	}
 
 	if node.Spec.ProviderID == "" {
-		node.Spec.ProviderID = *machine.Spec.ProviderID
+		node.Spec.ProviderID = machine.Spec.ProviderID
 		node.Labels[machineNameNodeLabel] = machine.GetName()
 		err = retry.OnError(retry.DefaultBackoff, func(err error) bool {
 			return true

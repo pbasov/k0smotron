@@ -22,6 +22,7 @@ resources:
 - ../manager
 - ../webhook
 - ../certmanager
+- ../runtimeextension
 #- ../prometheus
 
 # Protect the /metrics endpoint by putting it behind auth.
@@ -124,3 +125,47 @@ replacements:
       group: cert-manager.io
       kind: Certificate
       version: v1
+  - fieldPaths:
+    - .spec.clientConfig.service.namespace
+    select:
+      group: runtime.cluster.x-k8s.io
+      kind: ExtensionConfig
+      version: v1alpha1
+  - fieldPaths:
+    - .metadata.annotations.[runtime.cluster.x-k8s.io/inject-ca-from-secret]
+    options:
+      create: true
+      delimiter: /
+    select:
+      group: runtime.cluster.x-k8s.io
+      kind: ExtensionConfig
+      version: v1alpha1
+- source:
+    fieldPath: .metadata.name
+    kind: Service
+    name: webhook-service
+    version: v1
+  targets:
+  - fieldPaths:
+    - .spec.clientConfig.service.name
+    select:
+      group: runtime.cluster.x-k8s.io
+      kind: ExtensionConfig
+      version: v1alpha1
+- source:
+    fieldPath: .spec.secretName
+    group: cert-manager.io
+    kind: Certificate
+    name: serving-cert
+    version: v1
+  targets:
+  - fieldPaths:
+    - .metadata.annotations.[runtime.cluster.x-k8s.io/inject-ca-from-secret]
+    options:
+      create: true
+      delimiter: /
+      index: 1
+    select:
+      group: runtime.cluster.x-k8s.io
+      kind: ExtensionConfig
+      version: v1alpha1

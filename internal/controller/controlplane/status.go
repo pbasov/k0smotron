@@ -27,12 +27,12 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/types"
-	clusterv1 "sigs.k8s.io/cluster-api/api/v1beta1"
+	clusterv1 "sigs.k8s.io/cluster-api/api/core/v1beta2"
 	"sigs.k8s.io/cluster-api/controllers/remote"
 	"sigs.k8s.io/cluster-api/util"
 	"sigs.k8s.io/cluster-api/util/annotations"
 	"sigs.k8s.io/cluster-api/util/collections"
-	"sigs.k8s.io/cluster-api/util/conditions"
+	conditions "sigs.k8s.io/cluster-api/util/conditions/deprecated/v1beta1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
@@ -266,15 +266,15 @@ func (rc *machineStatus) compute(kcp *cpv1beta1.K0sControlPlane) error {
 // versionMatches checks if the machine version matches the kcp version taking the possibly missing suffix into account
 func versionMatches(machine *clusterv1.Machine, ver string) bool {
 
-	if machine.Spec.Version == nil || *machine.Spec.Version == "" {
+	if machine.Spec.Version == "" {
 		return false
 	}
 
-	if *machine.Spec.Version == ver {
+	if machine.Spec.Version == ver {
 		return true
 	}
 
-	machineVersion := *machine.Spec.Version
+	machineVersion := machine.Spec.Version
 	kcpVersion := ver
 
 	// If either of the versions is missing the suffix, we need to add it

@@ -12,8 +12,8 @@ providers:
   - name: cluster-api
     type: CoreProvider
     versions:
-      - name: "{go://sigs.k8s.io/cluster-api@v1.10}"
-        value: https://github.com/kubernetes-sigs/cluster-api/releases/download/{go://sigs.k8s.io/cluster-api@v1.10}/core-components.yaml
+      - name: "{go://sigs.k8s.io/cluster-api@v1.12}"
+        value: https://github.com/kubernetes-sigs/cluster-api/releases/download/{go://sigs.k8s.io/cluster-api@v1.12}/core-components.yaml
         type: url
         contract: v1beta1
         files:
@@ -24,8 +24,8 @@ providers:
   - name: docker
     type: InfrastructureProvider
     versions:
-      - name: "{go://sigs.k8s.io/cluster-api@v1.10}"
-        value: https://github.com/kubernetes-sigs/cluster-api/releases/download/{go://sigs.k8s.io/cluster-api@v1.10}/infrastructure-components-development.yaml
+      - name: "{go://sigs.k8s.io/cluster-api@v1.12}"
+        value: https://github.com/kubernetes-sigs/cluster-api/releases/download/{go://sigs.k8s.io/cluster-api@v1.12}/infrastructure-components-development.yaml
         type: url
         contract: v1beta1
         files:
@@ -72,7 +72,7 @@ providers:
           - old: "imagePullPolicy: Always"
             new: "imagePullPolicy: IfNotPresent"
       - name: v1.10.99 # potentially next release. Manifest from source files (development) are used.
-        value: ../../config/default
+        value: ../../config/runtimeextension-enabled
         contract: v1beta1
         files:
           - sourcePath: "../../metadata.yaml"
@@ -130,7 +130,7 @@ providers:
           - old: "imagePullPolicy: Always"
             new: "imagePullPolicy: IfNotPresent"
       - name: v1.10.99 # potentially next release. Manifest from source files (development) are used.
-        value: ../../config/default
+        value: ../../config/runtimeextension-enabled
         contract: v1beta1
         files:
           - sourcePath: "../../metadata.yaml"
@@ -150,6 +150,7 @@ variables:
   # Enabling the feature flags by setting the env variables.
   CLUSTER_TOPOLOGY: "true"
   EXP_MACHINE_POOL: "true"
+  EXP_RUNTIME_SDK: "true"
 
 intervals:
   # The array is defined as [timeout, polling interval]
@@ -181,3 +182,9 @@ intervals:
   machinedeployment/wait-cluster: ["20m", "10s"]
   machinedeployment/wait-control-plane: ["20m", "10s"]
   machinedeployment/wait-delete-cluster: ["20m", "10s"]
+  runtime-extension/wait-cluster: ["10m", "10s"]
+  runtime-extension/wait-control-plane: ["20m", "10s"]
+  runtime-extension/wait-controllers: ["5m", "10s"]
+  runtime-extension/wait-autopilot-plan: ["10m", "15s"]
+  runtime-extension/wait-delete-cluster: ["10m", "10s"]
+  runtime-extension/wait-kube-proxy-upgrade: ["30m", "10s"]

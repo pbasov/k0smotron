@@ -19,10 +19,13 @@ package featuregate
 const (
 	// CloudInitVars enables storing k0smotron-generated command and files in cloud-init variables
 	CloudInitVars Feature = "CloudInitVars"
+	// RuntimeExtension enables the CAPI Runtime Extension server for in-place updates
+	RuntimeExtension Feature = "RuntimeExtension"
 )
 
 var effectiveFeatureGates *FeatureGates
 
 var defaultFeatureMap = map[Feature]FeatureGate{
-	CloudInitVars: {Enabled: false},
+	CloudInitVars:    {Enabled: false},
+	RuntimeExtension: {Enabled: false},
 }

@@ -151,6 +151,7 @@ variables:
   CLUSTER_TOPOLOGY: "true"
   EXP_MACHINE_POOL: "true"
   EXP_RUNTIME_SDK: "true"
+  EXP_IN_PLACE_UPDATES: "true"
 
 intervals:
   # The array is defined as [timeout, polling interval]

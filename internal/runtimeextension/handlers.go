@@ -22,7 +22,6 @@ import (
 	"fmt"
 
 	corev1 "k8s.io/api/core/v1"
-	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/types"
 	clusterv1 "sigs.k8s.io/cluster-api/api/core/v1beta2"
 	runtimehooksv1 "sigs.k8s.io/cluster-api/api/runtime/hooks/v1alpha1"
@@ -33,8 +32,9 @@ import (
 )
 
 const (
-	// planNamePrefix is the prefix for per-machine autopilot plan names.
-	planNamePrefix = "autopilot-inplace-"
+	// autopilotPlanName is the fixed name required by Autopilot.
+	// Autopilot only processes plans named exactly "autopilot".
+	autopilotPlanName = "autopilot"
 
 	// defaultRetryAfterSeconds is the default retry interval for in-progress updates.
 	defaultRetryAfterSeconds = 30
@@ -133,6 +133,9 @@ func (h *ExtensionHandler) CanUpdateMachineSet(ctx context.Context, req *runtime
 }
 
 // UpdateMachine performs the actual in-place update on a machine using Autopilot.
+// Note: Autopilot only processes plans named exactly "autopilot", so only one
+// machine can be updated at a time. If a plan is already in progress for a
+// different machine, this function returns a retry response.
 func (h *ExtensionHandler) UpdateMachine(ctx context.Context, req *runtimehooksv1.UpdateMachineRequest, resp *runtimehooksv1.UpdateMachineResponse) {
 	logger := log.FromContext(ctx).WithValues("machine", req.Desired.Machine.Name)
 	logger.Info("UpdateMachine called")
@@ -166,22 +169,28 @@ func (h *ExtensionHandler) UpdateMachine(ctx context.Context, req *runtimehooksv
 		return
 	}
 
-	planName := planNamePrefix + machine.Name
-
-	// Check if plan already exists
-	planState, err := h.getPlanState(ctx, kubeClient, planName)
-	if err != nil && !apierrors.IsNotFound(err) {
+	// Check if the "autopilot" plan already exists
+	planState, targetMachine, err := h.getPlanStateAndTarget(ctx, kubeClient)
+	if err != nil {
 		logger.Error(err, "Failed to get plan state")
 		resp.SetStatus(runtimehooksv1.ResponseStatusFailure)
 		resp.SetMessage(fmt.Sprintf("failed to get plan state: %v", err))
 		return
 	}
 
+	// If a plan exists for a different machine, wait for it to complete
+	if planState != PlanStateNotFound && targetMachine != "" && targetMachine != machine.Name {
+		logger.Info("Autopilot plan in progress for different machine", "targetMachine", targetMachine, "state", planState)
+		resp.SetStatus(runtimehooksv1.ResponseStatusSuccess)
+		resp.SetRetryAfterSeconds(defaultRetryAfterSeconds)
+		return
+	}
+
 	switch planState {
 	case PlanStateCompleted:
-		// Plan completed successfully, delete the plan and signal completion
+		// Plan completed successfully for this machine, delete the plan and signal completion
 		logger.Info("Autopilot plan completed successfully")
-		if err := h.deletePlan(ctx, kubeClient, planName); err != nil {
+		if err := h.deletePlan(ctx, kubeClient, autopilotPlanName); err != nil {
 			logger.Error(err, "Failed to delete completed plan")
 		}
 		resp.SetStatus(runtimehooksv1.ResponseStatusSuccess)
@@ -189,7 +198,7 @@ func (h *ExtensionHandler) UpdateMachine(ctx context.Context, req *runtimehooksv
 		return
 
 	case PlanStateSchedulable, PlanStateSchedulableWait:
-		// Plan is in progress, retry later
+		// Plan is in progress for this machine, retry later
 		logger.Info("Autopilot plan in progress", "state", planState)
 		resp.SetStatus(runtimehooksv1.ResponseStatusSuccess)
 		resp.SetRetryAfterSeconds(defaultRetryAfterSeconds)
@@ -198,7 +207,7 @@ func (h *ExtensionHandler) UpdateMachine(ctx context.Context, req *runtimehooksv
 	case PlanStateFailed:
 		// Plan failed, delete and retry
 		logger.Info("Autopilot plan failed, will retry")
-		if err := h.deletePlan(ctx, kubeClient, planName); err != nil {
+		if err := h.deletePlan(ctx, kubeClient, autopilotPlanName); err != nil {
 			logger.Error(err, "Failed to delete failed plan")
 		}
 		// Fall through to create a new plan
@@ -208,8 +217,8 @@ func (h *ExtensionHandler) UpdateMachine(ctx context.Context, req *runtimehooksv
 		logger.Info("Creating new Autopilot plan")
 	}
 
-	// Create the per-machine Autopilot plan
-	if err := h.createPerMachinePlan(ctx, kubeClient, machine, kcp); err != nil {
+	// Create the Autopilot plan for this machine
+	if err := h.createAutopilotPlan(ctx, kubeClient, machine, kcp); err != nil {
 		logger.Error(err, "Failed to create Autopilot plan")
 		resp.SetStatus(runtimehooksv1.ResponseStatusFailure)
 		resp.SetMessage(fmt.Sprintf("failed to create autopilot plan: %v", err))

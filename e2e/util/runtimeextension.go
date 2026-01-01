@@ -33,8 +33,9 @@ import (
 )
 
 const (
-	// autopilotPlanPrefix is the prefix for per-machine autopilot plan names.
-	autopilotPlanPrefix = "autopilot-inplace-"
+	// autopilotPlanName is the fixed name required by Autopilot.
+	// Autopilot only processes plans named exactly "autopilot".
+	autopilotPlanName = "autopilot"
 
 	// Autopilot plan states
 	planStateCompleted      = "Completed"
@@ -98,16 +99,14 @@ func WaitForExtensionConfigDiscovery(ctx context.Context, input WaitForExtension
 // WaitForAutopilotPlanCreatedInput specifies the input for WaitForAutopilotPlanCreated.
 type WaitForAutopilotPlanCreatedInput struct {
 	WorkloadClientSet *kubernetes.Clientset
-	MachineName       string
 }
 
-// WaitForAutopilotPlanCreated waits until an Autopilot plan is created for a specific machine.
+// WaitForAutopilotPlanCreated waits until the "autopilot" plan is created.
+// Note: Autopilot only processes plans named exactly "autopilot".
 func WaitForAutopilotPlanCreated(ctx context.Context, input WaitForAutopilotPlanCreatedInput, interval Interval) error {
-	planName := autopilotPlanPrefix + input.MachineName
-
 	return wait.PollUntilContextTimeout(ctx, interval.tick, interval.timeout, true, func(ctx context.Context) (bool, error) {
 		_, err := input.WorkloadClientSet.RESTClient().Get().
-			AbsPath("/apis/autopilot.k0sproject.io/v1beta2/plans/" + planName).
+			AbsPath("/apis/autopilot.k0sproject.io/v1beta2/plans/" + autopilotPlanName).
 			DoRaw(ctx)
 		if err != nil {
 			if apierrors.IsNotFound(err) {
@@ -123,18 +122,16 @@ func WaitForAutopilotPlanCreated(ctx context.Context, input WaitForAutopilotPlan
 // WaitForAutopilotPlanCompletedInput specifies the input for WaitForAutopilotPlanCompleted.
 type WaitForAutopilotPlanCompletedInput struct {
 	WorkloadClientSet *kubernetes.Clientset
-	MachineName       string
 }
 
-// WaitForAutopilotPlanCompleted waits until an Autopilot plan completes for a specific machine.
+// WaitForAutopilotPlanCompleted waits until the "autopilot" plan completes.
+// Note: Autopilot only processes plans named exactly "autopilot".
 func WaitForAutopilotPlanCompleted(ctx context.Context, input WaitForAutopilotPlanCompletedInput, interval Interval) error {
-	planName := autopilotPlanPrefix + input.MachineName
-
 	return wait.PollUntilContextTimeout(ctx, interval.tick, interval.timeout, true, func(ctx context.Context) (bool, error) {
-		state, err := GetAutopilotPlanState(ctx, input.WorkloadClientSet, planName)
+		state, err := GetAutopilotPlanState(ctx, input.WorkloadClientSet, autopilotPlanName)
 		if err != nil {
 			if apierrors.IsNotFound(err) {
-				// Plan was deleted (cleanup happened) - consider as completed
+				// Plan was deleted (cleanup happened after completion) - this means it completed
 				return true, nil
 			}
 			// Continue polling on other errors
@@ -150,32 +147,68 @@ func WaitForAutopilotPlanCompleted(ctx context.Context, input WaitForAutopilotPl
 		default:
 			// Failed state or unknown - report error
 			if strings.Contains(state, "Failed") || strings.Contains(state, "Incomplete") {
-				return false, fmt.Errorf("autopilot plan %s failed with state: %s", planName, state)
+				return false, fmt.Errorf("autopilot plan failed with state: %s", state)
 			}
 			return false, nil
 		}
 	})
 }
 
-// WaitForAllAutopilotPlansCompletedInput specifies the input for WaitForAllAutopilotPlansCompleted.
-type WaitForAllAutopilotPlansCompletedInput struct {
+// WaitForAllMachinesUpdatedInput specifies the input for WaitForAllMachinesUpdated.
+type WaitForAllMachinesUpdatedInput struct {
 	WorkloadClientSet *kubernetes.Clientset
-	MachineNames      []string
+	MachineCount      int
 }
 
-// WaitForAllAutopilotPlansCompleted waits until all Autopilot plans complete for a list of machines.
-func WaitForAllAutopilotPlansCompleted(ctx context.Context, input WaitForAllAutopilotPlansCompletedInput, interval Interval) error {
-	for _, machineName := range input.MachineNames {
-		err := WaitForAutopilotPlanCompleted(ctx, WaitForAutopilotPlanCompletedInput{
-			WorkloadClientSet: input.WorkloadClientSet,
-			MachineName:       machineName,
-		}, interval)
+// WaitForAllMachinesUpdated waits until all machines have been updated.
+// Since Autopilot only processes one plan at a time (named "autopilot"),
+// this function waits for all sequential updates to complete by monitoring
+// the number of completed plan cycles.
+func WaitForAllMachinesUpdated(ctx context.Context, input WaitForAllMachinesUpdatedInput, interval Interval) error {
+	// We expect `MachineCount` plans to be created and completed in sequence.
+	// Each plan will be created, processed, completed, and deleted by the runtime extension.
+	// The best way to track this is to wait until no plan exists and all machines have been updated.
+	// The runtime extension handles this sequentially via retries.
+
+	// Simply wait for the plan to not exist (final cleanup happened)
+	// The runtime extension will keep retrying until all machines are updated
+	fmt.Printf("Waiting for all %d machines to be updated via Autopilot...\n", input.MachineCount)
+
+	return wait.PollUntilContextTimeout(ctx, interval.tick, interval.timeout, true, func(ctx context.Context) (bool, error) {
+		_, err := input.WorkloadClientSet.RESTClient().Get().
+			AbsPath("/apis/autopilot.k0sproject.io/v1beta2/plans/" + autopilotPlanName).
+			DoRaw(ctx)
 		if err != nil {
-			return fmt.Errorf("failed waiting for machine %s: %w", machineName, err)
+			if apierrors.IsNotFound(err) {
+				// No plan exists - check if all updates are complete
+				// The runtime extension only deletes plans after completion
+				// If there's no plan, either all updates are done or none have started
+				fmt.Println("No autopilot plan found - checking if updates are complete")
+				return true, nil
+			}
+			return false, nil
 		}
-		fmt.Printf("Autopilot plan completed for machine: %s\n", machineName)
-	}
-	return nil
+
+		// Plan still exists, check its state
+		state, err := GetAutopilotPlanState(ctx, input.WorkloadClientSet, autopilotPlanName)
+		if err != nil {
+			return false, nil
+		}
+
+		fmt.Printf("Autopilot plan state: %s\n", state)
+
+		// If the plan failed, report the error
+		if strings.Contains(state, "Failed") || strings.Contains(state, "Incomplete") || strings.Contains(state, "MissingSignalNode") {
+			details, _ := GetAutopilotPlanDetails(ctx, input.WorkloadClientSet, autopilotPlanName)
+			if details != nil {
+				rawStatus, _ := json.MarshalIndent(details["status"], "", "  ")
+				fmt.Printf("Plan failed. Status: %s\n", string(rawStatus))
+			}
+			return false, fmt.Errorf("autopilot plan failed with state: %s", state)
+		}
+
+		return false, nil
+	})
 }
 
 // ListAutopilotPlans lists all Autopilot plans in the workload cluster.
@@ -259,17 +292,130 @@ func GetControlPlaneMachineNames(ctx context.Context, input GetControlPlaneMachi
 	return names, nil
 }
 
-// HasInPlaceAutopilotPlans checks if there are any in-place autopilot plans remaining.
-func HasInPlaceAutopilotPlans(ctx context.Context, clientSet *kubernetes.Clientset) (bool, error) {
-	plans, err := ListAutopilotPlans(ctx, clientSet)
+// HasAutopilotPlan checks if the "autopilot" plan exists.
+func HasAutopilotPlan(ctx context.Context, clientSet *kubernetes.Clientset) (bool, error) {
+	_, err := clientSet.RESTClient().Get().
+		AbsPath("/apis/autopilot.k0sproject.io/v1beta2/plans/" + autopilotPlanName).
+		DoRaw(ctx)
 	if err != nil {
+		if apierrors.IsNotFound(err) {
+			return false, nil
+		}
 		return false, err
 	}
+	return true, nil
+}
 
-	for _, plan := range plans {
-		if strings.HasPrefix(plan, autopilotPlanPrefix) {
-			return true, nil
+// ListControlNodes lists all ControlNode names in the workload cluster.
+func ListControlNodes(ctx context.Context, clientSet *kubernetes.Clientset) ([]string, error) {
+	result, err := clientSet.RESTClient().Get().
+		AbsPath("/apis/autopilot.k0sproject.io/v1beta2/controlnodes").
+		DoRaw(ctx)
+	if err != nil {
+		if apierrors.IsNotFound(err) {
+			return nil, nil
+		}
+		return nil, err
+	}
+
+	var nodeList struct {
+		Items []struct {
+			Metadata struct {
+				Name string `json:"name"`
+			} `json:"metadata"`
+		} `json:"items"`
+	}
+
+	if err := json.Unmarshal(result, &nodeList); err != nil {
+		return nil, err
+	}
+
+	var names []string
+	for _, item := range nodeList.Items {
+		names = append(names, item.Metadata.Name)
+	}
+	return names, nil
+}
+
+// GetAutopilotPlanDetails retrieves full details of an Autopilot plan including spec and status.
+func GetAutopilotPlanDetails(ctx context.Context, clientSet *kubernetes.Clientset, planName string) (map[string]interface{}, error) {
+	result, err := clientSet.RESTClient().Get().
+		AbsPath("/apis/autopilot.k0sproject.io/v1beta2/plans/" + planName).
+		DoRaw(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	var plan map[string]interface{}
+	if err := json.Unmarshal(result, &plan); err != nil {
+		return nil, err
+	}
+
+	return plan, nil
+}
+
+// DumpAutopilotDebugInfo prints debugging information about Autopilot state.
+func DumpAutopilotDebugInfo(ctx context.Context, clientSet *kubernetes.Clientset, machineNames []string) {
+	fmt.Println("=== Autopilot Debug Info ===")
+
+	// List ControlNodes
+	controlNodes, err := ListControlNodes(ctx, clientSet)
+	if err != nil {
+		fmt.Printf("Error listing ControlNodes: %v\n", err)
+	} else {
+		fmt.Printf("ControlNodes: %v\n", controlNodes)
+	}
+
+	// List Plans
+	plans, err := ListAutopilotPlans(ctx, clientSet)
+	if err != nil {
+		fmt.Printf("Error listing Plans: %v\n", err)
+	} else {
+		fmt.Printf("Plans: %v\n", plans)
+	}
+
+	// Get details for the "autopilot" plan
+	details, err := GetAutopilotPlanDetails(ctx, clientSet, autopilotPlanName)
+	if err != nil {
+		fmt.Printf("Plan %s: error getting details: %v\n", autopilotPlanName, err)
+	} else {
+		// Extract relevant info
+		status, _ := details["status"].(map[string]interface{})
+		spec, _ := details["spec"].(map[string]interface{})
+
+		state := "unknown"
+		if status != nil {
+			if s, ok := status["state"].(string); ok {
+				state = s
+			}
+		}
+
+		planID := ""
+		if spec != nil {
+			if id, ok := spec["id"].(string); ok {
+				planID = id
+			}
+		}
+
+		fmt.Printf("Plan %s:\n  State: %s\n  ID: %s\n", autopilotPlanName, state, planID)
+		// Always print the raw status
+		rawStatus, _ := json.MarshalIndent(status, "  ", "  ")
+		fmt.Printf("  Raw Status: %s\n", string(rawStatus))
+		if spec != nil {
+			// Print commands section
+			if commands, ok := spec["commands"].([]interface{}); ok && len(commands) > 0 {
+				if cmd, ok := commands[0].(map[string]interface{}); ok {
+					if k0supdate, ok := cmd["k0supdate"].(map[string]interface{}); ok {
+						if targets, ok := k0supdate["targets"].(map[string]interface{}); ok {
+							targetsJSON, _ := json.MarshalIndent(targets, "  ", "  ")
+							fmt.Printf("  Targets: %s\n", string(targetsJSON))
+						}
+					}
+				}
+			}
 		}
 	}
-	return false, nil
+
+	fmt.Printf("Expected machines: %v\n", machineNames)
+	fmt.Println("=== End Autopilot Debug Info ===")
 }

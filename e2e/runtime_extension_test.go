@@ -160,10 +160,10 @@ func runtimeExtensionSpec(t *testing.T) {
 	workloadClientSet, err := kubernetes.NewForConfig(workloadCluster.GetRESTConfig())
 	require.NoError(t, err, "Should get workload cluster clientset")
 
-	// Verify no in-place Autopilot plans exist initially
-	hasPlans, err := util.HasInPlaceAutopilotPlans(ctx, workloadClientSet)
+	// Verify no Autopilot plan exists initially
+	hasPlans, err := util.HasAutopilotPlan(ctx, workloadClientSet)
 	require.NoError(t, err)
-	require.False(t, hasPlans, "No in-place Autopilot plans should exist initially")
+	require.False(t, hasPlans, "No Autopilot plan should exist initially")
 
 	// ================================================
 	// Step 5: Trigger Version Upgrade
@@ -187,48 +187,57 @@ func runtimeExtensionSpec(t *testing.T) {
 	require.NoError(t, err, "Failed to update K0sControlPlane version")
 
 	// ================================================
-	// Step 6: Verify Autopilot Plans are Created
+	// Step 6: Verify Autopilot Plan is Created
 	// ================================================
-	fmt.Println("Step 6: Verifying Autopilot plans are created")
+	fmt.Println("Step 6: Verifying Autopilot plan is created")
 
-	// Wait for Autopilot plans to be created for each machine
-	for _, machineName := range machineNames {
-		err := util.WaitForAutopilotPlanCreated(ctx, util.WaitForAutopilotPlanCreatedInput{
-			WorkloadClientSet: workloadClientSet,
-			MachineName:       machineName,
-		}, util.GetInterval(e2eConfig, testName, "wait-autopilot-plan"))
-		require.NoError(t, err, "Autopilot plan should be created for machine %s", machineName)
-		fmt.Printf("Autopilot plan created for machine: %s\n", machineName)
+	// Wait for the "autopilot" plan to be created (Autopilot only processes plans named "autopilot")
+	err = util.WaitForAutopilotPlanCreated(ctx, util.WaitForAutopilotPlanCreatedInput{
+		WorkloadClientSet: workloadClientSet,
+	}, util.GetInterval(e2eConfig, testName, "wait-autopilot-plan"))
+	require.NoError(t, err, "Autopilot plan should be created")
+	fmt.Println("Autopilot plan created")
+
+	// ================================================
+	// Step 7: Wait for All Machines to be Updated
+	// ================================================
+	fmt.Println("Step 7: Waiting for all machines to be updated via Autopilot")
+
+	// Dump debug info to understand the Autopilot state
+	fmt.Println("Dumping Autopilot debug info before waiting for completion...")
+	util.DumpAutopilotDebugInfo(ctx, workloadClientSet, machineNames)
+
+	// Wait for all machines to be updated (plans are processed sequentially, one at a time)
+	err = util.WaitForAllMachinesUpdated(ctx, util.WaitForAllMachinesUpdatedInput{
+		WorkloadClientSet: workloadClientSet,
+		MachineCount:      len(machineNames),
+	}, util.GetInterval(e2eConfig, testName, "wait-kube-proxy-upgrade"))
+
+	// Dump debug info again if we fail
+	if err != nil {
+		fmt.Println("Updates did not complete, dumping final debug info...")
+		util.DumpAutopilotDebugInfo(ctx, workloadClientSet, machineNames)
 	}
 
-	// ================================================
-	// Step 7: Wait for Autopilot Plans to Complete
-	// ================================================
-	fmt.Println("Step 7: Waiting for Autopilot plans to complete")
+	require.NoError(t, err, "All machines should be updated successfully")
 
-	err = util.WaitForAllAutopilotPlansCompleted(ctx, util.WaitForAllAutopilotPlansCompletedInput{
-		WorkloadClientSet: workloadClientSet,
-		MachineNames:      machineNames,
-	}, util.GetInterval(e2eConfig, testName, "wait-kube-proxy-upgrade"))
-	require.NoError(t, err, "All Autopilot plans should complete successfully")
-
-	fmt.Println("All Autopilot plans completed successfully")
+	fmt.Println("All machines updated successfully")
 
 	// ================================================
-	// Step 8: Verify Plans are Cleaned Up
+	// Step 8: Verify Plan is Cleaned Up
 	// ================================================
-	fmt.Println("Step 8: Verifying Autopilot plans are cleaned up")
+	fmt.Println("Step 8: Verifying Autopilot plan is cleaned up")
 
-	// Wait for cleanup to occur
+	// Wait for cleanup to occur (the "autopilot" plan should be deleted after completion)
 	require.Eventually(t, func() bool {
-		hasPlans, err := util.HasInPlaceAutopilotPlans(ctx, workloadClientSet)
+		hasPlans, err := util.HasAutopilotPlan(ctx, workloadClientSet)
 		if err != nil {
 			return false
 		}
 		return !hasPlans
-	}, 2*time.Minute, 10*time.Second, "Autopilot plans should be cleaned up")
+	}, 2*time.Minute, 10*time.Second, "Autopilot plan should be cleaned up")
 
-	fmt.Println("Autopilot plans cleaned up")
+	fmt.Println("Autopilot plan cleaned up")
 
 	// ================================================
 	// Step 9: Verify Control Plane Version Upgrade Completed

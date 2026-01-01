@@ -34,6 +34,7 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	kerrors "k8s.io/apimachinery/pkg/util/errors"
 	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/apimachinery/pkg/util/wait"
@@ -58,6 +59,7 @@ import (
 
 	bootstrapv1 "github.com/k0sproject/k0smotron/api/bootstrap/v1beta1"
 	cpv1beta1 "github.com/k0sproject/k0smotron/api/controlplane/v1beta1"
+	"github.com/k0sproject/k0smotron/internal/featuregate"
 	kutil "github.com/k0sproject/k0smotron/internal/util"
 )
 
@@ -408,16 +410,31 @@ func (c *K0sController) reconcileMachines(ctx context.Context, cluster *clusterv
 		if m.Spec.Version == "" || (!versionMatches(m, kcp.Spec.Version)) {
 			clusterIsUpdating = true
 			if kcp.Spec.UpdateStrategy == cpv1beta1.UpdateInPlace {
+				// Trigger CAPI runtime extension hooks for in-place update
+				// This sets annotations that cause CAPI's machine controller to call UpdateMachine hook
+				if err := c.updateMachineVersionForInPlace(ctx, m, kcp.Spec.Version); err != nil {
+					return fmt.Errorf("error triggering in-place update for machine: %w", err)
+				}
 				desiredMachines.Insert(m)
 			} else {
 				machineNamesToDelete[m.Name] = true
 			}
 		} else if !matchesTemplateClonedFrom(infraMachines, kcp, m) || hasControllerConfigChanged(bootstrapConfigs, kcp, m) {
-			if _, found := infraMachines[m.Name]; !found {
-				infraMachineMissing = true
+			// For InPlace strategy, don't delete machines for config changes - just sync values in place
+			if kcp.Spec.UpdateStrategy == cpv1beta1.UpdateInPlace {
+				err := c.inplaceSyncMachineValues(ctx, kcp, m)
+				if err != nil {
+					return fmt.Errorf("error syncing in-place updates to machine %s: %w", m.Name, err)
+				}
+				desiredMachines.Insert(m)
+			} else {
+				// For Recreate strategy, mark for deletion
+				if _, found := infraMachines[m.Name]; !found {
+					infraMachineMissing = true
+				}
+				configurationHasChanged = true
+				machineNamesToDelete[m.Name] = true
 			}
-			configurationHasChanged = true
-			machineNamesToDelete[m.Name] = true
 		} else {
 			err := c.inplaceSyncMachineValues(ctx, kcp, m)
 			if err != nil {
@@ -455,7 +472,10 @@ func (c *K0sController) reconcileMachines(ctx context.Context, cluster *clusterv
 					}
 				}
 			}
-		} else {
+		} else if !featuregate.IsEnabled(featuregate.RuntimeExtension) {
+			// For InPlace strategy without RuntimeExtension, use the legacy cluster-wide Autopilot plan approach.
+			// When RuntimeExtension is enabled, the per-machine Autopilot plans are created by the
+			// UpdateMachine hook handler, which is triggered by the annotations we set in updateMachineVersionForInPlace.
 			kubeClient, err := c.getKubeClient(ctx, cluster)
 			if err != nil {
 				return fmt.Errorf("error getting cluster client set for machine update: %w", err)
@@ -466,6 +486,9 @@ func (c *K0sController) reconcileMachines(ctx context.Context, cluster *clusterv
 				return fmt.Errorf("error creating autopilot plan: %w", err)
 			}
 		}
+		// When RuntimeExtension is enabled, the UpdateMachine hook handler in the runtime extension
+		// creates per-machine Autopilot plans. The annotations we set trigger CAPI's machine controller
+		// to call the UpdateMachine hook.
 	}
 
 	tooManyMachines := len(machineNamesToDelete)+len(desiredMachines) > int(kcp.Spec.Replicas)
@@ -575,6 +598,200 @@ func (c *K0sController) inplaceSyncMachineValues(ctx context.Context, kcp *cpv1b
 	// Node*Timeout fields were removed from MachineSpec in CAPI v1beta2
 	// The timeout values are now managed at the MachineDeployment/MachineSet level
 	// This function is kept for compatibility but no longer updates these fields
+	return nil
+}
+
+// updateMachineVersionForInPlace updates a Machine's spec.version for in-place updates.
+// When RuntimeExtension feature gate is enabled, it also sets annotations to trigger
+// CAPI runtime extension hooks:
+// 1. Set UpdateInProgressAnnotation on Machine, InfraMachine, and BootstrapConfig
+// 2. Update Machine.spec.version
+// 3. Set PendingHooksAnnotation to trigger CAPI's machine controller to call UpdateMachine hook
+//
+// When RuntimeExtension is disabled, it only updates the version (legacy Autopilot plan is created separately).
+func (c *K0sController) updateMachineVersionForInPlace(ctx context.Context, machine *clusterv1.Machine, newVersion string) error {
+	// Skip if version already matches
+	if machine.Spec.Version == newVersion {
+		return nil
+	}
+
+	// When RuntimeExtension is not enabled, just update the version
+	// The legacy createAutopilotPlan approach will handle the actual in-place update
+	if !featuregate.IsEnabled(featuregate.RuntimeExtension) {
+		log.Log.Info("Updating Machine version for in-place update (legacy mode)",
+			"machine", machine.Name,
+			"oldVersion", machine.Spec.Version,
+			"newVersion", newVersion)
+
+		patch := client.MergeFrom(machine.DeepCopy())
+		machine.Spec.Version = newVersion
+
+		if err := c.Client.Patch(ctx, machine, patch); err != nil {
+			return fmt.Errorf("failed to patch machine version: %w", err)
+		}
+		return nil
+	}
+
+	// RuntimeExtension is enabled - use annotation-based approach
+
+	// Check if update is already in progress (has UpdateInProgressAnnotation)
+	if _, ok := machine.Annotations[clusterv1.UpdateInProgressAnnotation]; ok {
+		// Already in progress, just ensure version is correct
+		if machine.Spec.Version != newVersion {
+			patch := client.MergeFrom(machine.DeepCopy())
+			machine.Spec.Version = newVersion
+			if err := c.Client.Patch(ctx, machine, patch); err != nil {
+				return fmt.Errorf("failed to patch machine version: %w", err)
+			}
+		}
+		return nil
+	}
+
+	log.Log.Info("Triggering in-place update for Machine via RuntimeExtension",
+		"machine", machine.Name,
+		"oldVersion", machine.Spec.Version,
+		"newVersion", newVersion)
+
+	// First, set UpdateInProgressAnnotation on InfraMachine
+	// CAPI's machine controller requires this annotation on the InfraMachine before calling UpdateMachine hook
+	if err := c.setUpdateInProgressAnnotationOnInfraMachine(ctx, machine); err != nil {
+		return fmt.Errorf("failed to set UpdateInProgressAnnotation on InfraMachine: %w", err)
+	}
+
+	// Set UpdateInProgressAnnotation on BootstrapConfig (K0sControllerConfig)
+	// CAPI's machine controller requires this annotation on the BootstrapConfig before calling UpdateMachine hook
+	if err := c.setUpdateInProgressAnnotationOnBootstrapConfig(ctx, machine); err != nil {
+		return fmt.Errorf("failed to set UpdateInProgressAnnotation on BootstrapConfig: %w", err)
+	}
+
+	// Create a patch to:
+	// 1. Set UpdateInProgressAnnotation
+	// 2. Update version
+	// 3. Set PendingHooksAnnotation to trigger UpdateMachine hook
+	patch := client.MergeFrom(machine.DeepCopy())
+
+	if machine.Annotations == nil {
+		machine.Annotations = make(map[string]string)
+	}
+
+	// Set UpdateInProgressAnnotation to mark the machine as being in-place updated
+	// This annotation is used by CAPI's inplace.IsUpdateInProgress() to detect ongoing updates
+	machine.Annotations[clusterv1.UpdateInProgressAnnotation] = ""
+
+	// Set PendingHooksAnnotation to trigger CAPI's machine controller to call the UpdateMachine hook
+	// The value is the hook name that should be called
+	const pendingHooksAnnotation = "runtime.cluster.x-k8s.io/pending-hooks"
+	machine.Annotations[pendingHooksAnnotation] = "UpdateMachine"
+
+	// Update the version
+	machine.Spec.Version = newVersion
+
+	if err := c.Client.Patch(ctx, machine, patch); err != nil {
+		return fmt.Errorf("failed to patch machine for in-place update: %w", err)
+	}
+
+	log.Log.Info("Triggered in-place update for Machine via RuntimeExtension",
+		"machine", machine.Name,
+		"newVersion", newVersion)
+
+	return nil
+}
+
+// setUpdateInProgressAnnotationOnInfraMachine sets the UpdateInProgressAnnotation on the InfraMachine
+// referenced by the Machine. This is required by CAPI's machine controller before it calls the UpdateMachine hook.
+func (c *K0sController) setUpdateInProgressAnnotationOnInfraMachine(ctx context.Context, machine *clusterv1.Machine) error {
+	infraRef := machine.Spec.InfrastructureRef
+	if infraRef.Name == "" {
+		return nil
+	}
+
+	infraMachine := &unstructured.Unstructured{}
+	infraMachine.SetGroupVersionKind(schema.GroupVersionKind{
+		Group:   infraRef.APIGroup,
+		Kind:    infraRef.Kind,
+		Version: "v1beta1", // Assume v1beta1, adjust if needed
+	})
+
+	if err := c.Client.Get(ctx, client.ObjectKey{
+		Namespace: machine.Namespace,
+		Name:      infraRef.Name,
+	}, infraMachine); err != nil {
+		return fmt.Errorf("failed to get InfraMachine %s/%s: %w", machine.Namespace, infraRef.Name, err)
+	}
+
+	// Check if annotation already exists
+	annotations := infraMachine.GetAnnotations()
+	if annotations != nil {
+		if _, exists := annotations[clusterv1.UpdateInProgressAnnotation]; exists {
+			return nil
+		}
+	}
+
+	// Set the annotation
+	patch := client.MergeFrom(infraMachine.DeepCopy())
+	if annotations == nil {
+		annotations = make(map[string]string)
+	}
+	annotations[clusterv1.UpdateInProgressAnnotation] = ""
+	infraMachine.SetAnnotations(annotations)
+
+	if err := c.Client.Patch(ctx, infraMachine, patch); err != nil {
+		return fmt.Errorf("failed to patch InfraMachine with UpdateInProgressAnnotation: %w", err)
+	}
+
+	log.Log.Info("Set UpdateInProgressAnnotation on InfraMachine",
+		"infraMachine", infraRef.Name,
+		"namespace", machine.Namespace)
+
+	return nil
+}
+
+// setUpdateInProgressAnnotationOnBootstrapConfig sets the UpdateInProgressAnnotation on the BootstrapConfig
+// referenced by the Machine. This is required by CAPI's machine controller before it calls the UpdateMachine hook.
+func (c *K0sController) setUpdateInProgressAnnotationOnBootstrapConfig(ctx context.Context, machine *clusterv1.Machine) error {
+	configRef := machine.Spec.Bootstrap.ConfigRef
+	if configRef.Name == "" {
+		return nil
+	}
+
+	bootstrapConfig := &unstructured.Unstructured{}
+	bootstrapConfig.SetGroupVersionKind(schema.GroupVersionKind{
+		Group:   configRef.APIGroup,
+		Kind:    configRef.Kind,
+		Version: "v1beta1", // Assume v1beta1, adjust if needed
+	})
+
+	if err := c.Client.Get(ctx, client.ObjectKey{
+		Namespace: machine.Namespace,
+		Name:      configRef.Name,
+	}, bootstrapConfig); err != nil {
+		return fmt.Errorf("failed to get BootstrapConfig %s/%s: %w", machine.Namespace, configRef.Name, err)
+	}
+
+	// Check if annotation already exists
+	annotations := bootstrapConfig.GetAnnotations()
+	if annotations != nil {
+		if _, exists := annotations[clusterv1.UpdateInProgressAnnotation]; exists {
+			return nil
+		}
+	}
+
+	// Set the annotation
+	patch := client.MergeFrom(bootstrapConfig.DeepCopy())
+	if annotations == nil {
+		annotations = make(map[string]string)
+	}
+	annotations[clusterv1.UpdateInProgressAnnotation] = ""
+	bootstrapConfig.SetAnnotations(annotations)
+
+	if err := c.Client.Patch(ctx, bootstrapConfig, patch); err != nil {
+		return fmt.Errorf("failed to patch BootstrapConfig with UpdateInProgressAnnotation: %w", err)
+	}
+
+	log.Log.Info("Set UpdateInProgressAnnotation on BootstrapConfig",
+		"bootstrapConfig", configRef.Name,
+		"namespace", machine.Namespace)
+
 	return nil
 }
 

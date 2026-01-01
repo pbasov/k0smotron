@@ -44,47 +44,82 @@ const (
 	PlanStateFailed         PlanState = "Failed"
 )
 
-// getPlanState retrieves the current state of an Autopilot plan.
-func (h *ExtensionHandler) getPlanState(ctx context.Context, kubeClient *kubernetes.Clientset, planName string) (PlanState, error) {
-	logger := log.FromContext(ctx).WithValues("plan", planName)
+// getPlanStateAndTarget retrieves the current state of the "autopilot" plan and
+// extracts the target machine name from the plan's id field (format: "id-{machineName}-{timestamp}").
+func (h *ExtensionHandler) getPlanStateAndTarget(ctx context.Context, kubeClient *kubernetes.Clientset) (PlanState, string, error) {
+	logger := log.FromContext(ctx).WithValues("plan", autopilotPlanName)
 
 	result, err := kubeClient.RESTClient().Get().
-		AbsPath("/apis/autopilot.k0sproject.io/v1beta2/plans/" + planName).
+		AbsPath("/apis/autopilot.k0sproject.io/v1beta2/plans/" + autopilotPlanName).
 		DoRaw(ctx)
 	if err != nil {
 		if apierrors.IsNotFound(err) {
-			return PlanStateNotFound, nil
+			return PlanStateNotFound, "", nil
 		}
-		return "", err
+		return "", "", err
 	}
 
 	var plan autopilot.Plan
 	if err := yaml.Unmarshal(result, &plan); err != nil {
-		return "", fmt.Errorf("failed to unmarshal plan: %w", err)
+		return "", "", fmt.Errorf("failed to unmarshal plan: %w", err)
 	}
 
-	logger.Info("Plan state", "state", plan.Status.State)
+	logger.Info("Plan state", "state", plan.Status.State, "id", plan.Spec.ID)
 
+	// Extract machine name from plan ID (format: "id-{machineName}-{timestamp}")
+	targetMachine := extractMachineNameFromPlanID(plan.Spec.ID)
+
+	var state PlanState
 	switch plan.Status.State {
 	case core.PlanCompleted:
-		return PlanStateCompleted, nil
+		state = PlanStateCompleted
 	case core.PlanSchedulable:
-		return PlanStateSchedulable, nil
+		state = PlanStateSchedulable
 	case core.PlanSchedulableWait:
-		return PlanStateSchedulableWait, nil
+		state = PlanStateSchedulableWait
 	case core.PlanIncompleteTargets, core.PlanInconsistentTargets, core.PlanRestricted, core.PlanApplyFailed, core.PlanMissingSignalNode, core.PlanWarning:
-		return PlanStateFailed, nil
+		state = PlanStateFailed
 	default:
 		// Unknown state, treat as in progress
-		return PlanStateSchedulable, nil
+		state = PlanStateSchedulable
 	}
+
+	return state, targetMachine, nil
 }
 
-// createPerMachinePlan creates a per-machine Autopilot plan for in-place update.
-func (h *ExtensionHandler) createPerMachinePlan(ctx context.Context, kubeClient *kubernetes.Clientset, machine *clusterv1.Machine, kcp *cpv1beta1.K0sControlPlane) error {
+// extractMachineNameFromPlanID extracts the machine name from a plan ID.
+// Plan ID format: "id-{machineName}-{timestamp}"
+func extractMachineNameFromPlanID(planID string) string {
+	// Remove "id-" prefix
+	if len(planID) <= 3 || planID[:3] != "id-" {
+		return ""
+	}
+	remainder := planID[3:]
+
+	// Find the last dash (before timestamp)
+	lastDash := -1
+	for i := len(remainder) - 1; i >= 0; i-- {
+		if remainder[i] == '-' {
+			lastDash = i
+			break
+		}
+	}
+
+	if lastDash <= 0 {
+		return ""
+	}
+
+	return remainder[:lastDash]
+}
+
+// createAutopilotPlan creates an Autopilot plan for in-place update.
+// Note: Autopilot only processes plans named exactly "autopilot".
+// This function creates a plan targeting a single machine at a time.
+func (h *ExtensionHandler) createAutopilotPlan(ctx context.Context, kubeClient *kubernetes.Clientset, machine *clusterv1.Machine, kcp *cpv1beta1.K0sControlPlane) error {
 	logger := log.FromContext(ctx).WithValues("machine", machine.Name)
 
-	planName := planNamePrefix + machine.Name
+	// Autopilot requires the plan to be named "autopilot"
+	planName := autopilotPlanName
 	version := machine.Spec.Version
 
 	// Get download URLs
